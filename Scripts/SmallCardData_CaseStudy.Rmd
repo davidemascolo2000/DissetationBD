@@ -1,0 +1,354 @@
+---
+title: "Small Card Data"
+author: "Davide Mascolo"
+date: "28 aprile 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+```
+
+
+```{r}
+## Librerie
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(MLmetrics)
+library(tidyverse)
+library(ROCit)
+library(MASS)
+library(smotefamily)
+library(mccr)
+library(irr)
+library(fmsb)
+```
+
+
+```{r}
+## Carico i dati
+dat <- read.csv("creditcardcsvpresent.csv")
+
+## Struttura dei dati
+str(dat); dim(dat)
+
+## Verifico la presenza di NA
+table(is.na(dat))
+
+## Formatto le variabili
+dat$Transaction.date <- NULL
+
+dat$Is.declined      <- ifelse(dat$Is.declined == "Y", 1,0)
+dat$Is.declined      <- factor(dat$Is.declined)
+
+dat$isFradulent      <- ifelse(dat$isFradulent == "Y", 1,0)
+dat$isFradulent      <- factor(dat$isFradulent)
+
+dat$isForeignTransaction <- ifelse(dat$isForeignTransaction == "Y", 1,0)
+dat$isForeignTransaction <- factor(dat$isForeignTransaction)
+
+dat$isHighRiskCountry <- ifelse(dat$isHighRiskCountry == "Y", 1,0)
+dat$isHighRiskCountry <- factor(dat$isHighRiskCountry)
+
+```
+
+
+```{r}
+## Informazioni sui dati
+n   <- nrow(dat)
+nf  <- length(dat$isFradulent[dat$isFradulent == 1])
+nnf <- length(dat$isFradulent[dat$isFradulent == 0])
+pf  <- round((nf/n)*100,3)
+pnf <- 100 - pf
+
+message("N. Tot. di Transazioni: ", n); message("N. di Transazioni Non-Fraud: ", nnf); message("N. di Transazioni Fraud: ", nf); message("% Transazioni Fraud: ", pf); message("% Transazioni Non-Fraud: ", pnf)
+
+```
+
+
+```{r}
+## Statistiche di sintesi.
+dat %>% 
+  group_by(isFradulent) %>% 
+  summarise(total = n(),
+            mean  = mean(Transaction_amount),
+            std   = sd(Transaction_amount),
+            min   = min(Transaction_amount),
+            Q1    = quantile(Transaction_amount, probs = c(.25)),
+            Q2    = quantile(Transaction_amount, probs = c(.50)),
+            Q3    = quantile(Transaction_amount, probs = c(.75)),
+            max   = max(Transaction_amount))
+
+```
+
+
+```{r}
+## Distribuzione delle classi
+## Graficamente
+ggplot(aes(isFradulent, ..count..), data = dat) +
+  geom_bar() +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop..,
+                group = 1),
+            stat = "count", vjust = -.7) +
+  xlab("Transazione") +
+  ylab("Totale") +
+  ggtitle("Distribuzione delle transazioni")
+```
+
+
+```{r}
+## Amount (Boxplot)
+ggplot(dat, aes(x = isFradulent, y = Transaction_amount)) +
+  geom_boxplot() +
+  xlab("Transazione") +
+  ylab("Importo") +
+  ggtitle("")
+```
+
+
+```{r}
+## Modelling
+## Partizione dei dati
+u <- createDataPartition(dat$isFradulent, p = .90,
+                         times = 10,
+                         list = T)
+
+## Set Addestramento
+idx <- u[[1]]
+dat_add <- dat[idx, ]
+y_add   <- dat_add$isFradulent
+
+## External Validation Set (10% del set di dati iniziale)
+dat_validation  <- dat[-idx, ]
+y_validation    <- dat_validation$isFradulent
+
+```
+
+
+```{r}
+## Metriche
+f1 <- function(data, lev = NULL, model = NULL){
+  f1.val <- F1_Score(y_pred = data$pred,
+                     y_true = data$obs,
+                     positive = "1")
+  f2.val <- FBeta_Score(y_pred = data$pred,
+                        y_true = data$obs,
+                        positive = "1",
+                        beta = 2)
+  Pr <- posPredValue(data$pred, data$obs,
+                            positive = "1")
+  Rc <- sensitivity(data$pred, data$obs,
+                            positive = "1")
+  Sp <- specificity(data$pred, data$obs,
+                    positive = "1")
+  Npv <- negPredValue(data$pred, data$obs,
+                      positive = "1")
+  AUC <- rocit(score = as.numeric(data$pred),
+               class = data$obs)$AUC
+  MCC <- mccr(pred = data$pred,
+              act = data$obs)
+  Kp <- Kappa.test(table(data$obs, data$pred))$Result$estimate
+  
+  c(F1 = f1.val, F2 = f2.val, Precision = Pr, Recall = Rc,
+    Specificity = Sp, NegPredValue = Npv,
+    AUC = AUC, MCC = MCC, KCohen = Kp)
+}
+```
+
+
+```{r}
+## Repeated Cross Validation
+train.control <- trainControl(method = "repeatedcv",
+                          number = 10,
+                          repeats = 20,
+                          classProbs = F,
+                          summaryFunction = f1)
+
+## Regressione Logistica
+mod.logit <- train(isFradulent ~ ., data = dat_add,
+                   method = "glm",
+                   trControl = train.control)
+
+## Evaluation Metrics
+mod.logit
+
+## Valutazione degli errori medi in Cross-Validation
+cm.logit <- confusionMatrix(mod.logit)
+
+## Graficamente
+fourfoldplot(round(cm.logit$table, 2),
+             main = "Regressione Logistica")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.logit <- predict(mod.logit, newdata = dat_validation,
+                      type = "raw")
+
+## Performance
+cm.logit.val <- confusionMatrix(prev.logit,
+                                dat_validation$isFradulent,
+                                mode = "everything",
+                                positive = "1")
+## Graficamente
+fourfoldplot(cm.logit.val$table,
+             main = "Regressione Logistica (External Validation Set)")
+
+## F2Score
+f2.logit <- FBeta_Score(y_true = dat_validation$isFradulent,
+                        y_pred = prev.logit,
+                        positive = 1, beta = 2)
+## AUC
+roc.logit <- rocit(score = as.numeric(prev.logit),
+                    class = dat_validation$isFradulent)
+## Graficamente
+plot(roc.logit)
+
+## MCC
+MCC.logit <- mccr(act = dat_validation$isFradulent,
+                  pred = prev.logit)
+
+```
+
+
+```{r}
+## Analisi Discriminante Lineare
+mod.lda <- train(isFradulent ~ ., data = dat_add,
+                 method = "lda",
+                 trControl = train.control)
+
+## Evaluation Metrics
+mod.lda
+
+## Valutazione degli errori medi in Cross-Validation
+cm.lda <- confusionMatrix(mod.lda)
+
+## Graficamente
+fourfoldplot(round(cm.lda$table, 2), main = "LDA")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.lda <- predict(mod.lda, newdata = dat_validation)
+
+## Performance
+cm.lda.val <- confusionMatrix(prev.lda,
+                              dat_validation$isFradulent,
+                              mode = "everything",
+                              positive = "1")
+
+## Graficamente
+fourfoldplot(cm.lda.val$table,
+             main = "LDA (External Validation Set)")
+
+## F2Score
+f2.lda <- FBeta_Score(y_true = dat_validation$isFradulent,
+                      y_pred = prev.lda,
+                      positive = 1, beta = 2)
+
+## AUC
+roc.lda <- rocit(score = as.numeric(prev.lda),
+                 class = dat_validation$isFradulent)
+## Graficamente
+plot(roc.lda)
+
+## MCC
+MCC.lda <- mccr(act = dat_validation$isFradulent,
+                pred = prev.lda)
+
+```
+
+
+```{r}
+## Analisi Discriminante Quadratica
+mod.qda <- train(isFradulent ~ .,
+                 data = dat,
+                 method = "qda",
+                 trControl = train.control)
+
+## Evaluation Metrics
+mod.qda
+
+## Valutazione degli errori medi in Cross-Validation
+cm.qda <- confusionMatrix(mod.qda)
+
+## Graficamente
+fourfoldplot(round(cm.qda$table, 2), main = "QDA")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.qda <- predict(mod.qda, newdata = dat_validation)
+
+## Performance
+cm.qda.val <- confusionMatrix(prev.qda,
+                              dat_validation$isFradulent,
+                              mode = "everything",
+                              positive = "1")
+
+## Graficamente
+fourfoldplot(cm.qda.val$table, main = "QDA")
+
+## F2Score
+f2.qda <- FBeta_Score(y_true = dat_validation$isFradulent,
+                      y_pred = prev.qda$class,
+                      positive = 1, beta = 2)
+
+## AUC
+roc.qda <- rocit(score = as.numeric(prev.qda$class),
+                 class = dat_validation$isFradulent)
+## Graficamente
+plot(roc.qda)
+
+## MCC
+MCC.qda <- mccr(act = dat_validation$isFradulent,
+                pred = prev.qda$class)
+
+```
+
+
+```{r}
+## Albero di decisione
+mod.dt <- train(isFradulent ~ ., data = dat_add,
+                method = "rpart",
+                trControl = train.control)
+
+## Evaluation Metrics
+mod.dt
+
+## Valutazione degli errori medi in Cross-Validation
+cm.dt <- confusionMatrix(mod.dt)
+
+## Graficamente
+fourfoldplot(round(cm.dt$table, 2),
+             main = "Albero di Decisione")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.dt <- predict(mod.dt, newdata = dat_validation)
+
+## Performance
+cm.dt.val <- confusionMatrix(prev.dt,
+                             dat_validation$isFradulent,
+                             mode = "everything",
+                             positive = "1")
+
+## Graficamente
+fourfoldplot(cm.dt.val$table,
+             main = "Albero di Decisione (External Validation Set)")
+
+## F2Score
+f2.dt <- FBeta_Score(y_true = dat_validation$isFradulent,
+                     y_pred = prev.dt,
+                     positive = 1, beta = 2)
+
+## AUC
+roc.dt <- rocit(score = as.numeric(prev.dt),
+                class = dat_validation$isFradulent)
+## Graficamente
+plot(roc.dt)
+
+## MCC
+MCC.dt <- mccr(act = dat_validation$isFradulent,
+               pred = prev.dt)
+
+```
+
+

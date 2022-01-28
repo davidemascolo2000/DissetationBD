@@ -1,0 +1,370 @@
+---
+title: "European Analysis"
+author: "Davide Mascolo"
+date: "23 aprile 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+```
+
+
+```{r}
+## Librerie
+library(ggplot2)
+library(caret)
+library(MLmetrics)
+library(ROSE)
+library(e1071)
+library(randomForest)
+library(tidyverse)
+library(ROCit)
+library(rpart)
+library(rpart.plot)
+library(MASS)
+library(smotefamily)
+library(mccr)
+library(fmsb)
+```
+
+
+```{r}
+## Carico i dati
+dat <- read.csv("creditcard.csv", header = T)
+
+## Visualizzo la struttura
+str(dat);dim(dat)
+
+## Formatto la variabile di risposta
+dat$Class <- factor(dat$Class)
+
+## Verifichiamo la presenza di NA
+table(is.na(dat))
+
+## Sbilanciamento delle classi
+dat %>% 
+  group_by(Class) %>% 
+  tally()
+```
+
+
+```{r}
+## Informazioni sui dati
+n   <- nrow(dat)
+nf  <- length(dat$Class[dat$Class == 1])
+nnf <- length(dat$Class[dat$Class == 0])
+pf  <- round((nf/n)*100,3)
+pnf <- 100 - pf
+
+message("N. Tot. di Transazioni: ", n); message("N. di Transazioni Non-Fraud: ", nnf); message("N. di Transazioni Fraud: ", nf); message("% Transazioni Fraud: ", pf); message("% Transazioni Non-Fraud: ", pnf)
+```
+
+
+```{r}
+## Graficamente
+options(scipen = 999)
+ggplot(aes(Class, ..count..), data = dat) +
+  geom_bar(col = "grey") +
+  geom_text(aes(label = paste(round(after_stat(..prop..)*100,3), "%"),
+                y = ..prop.., group = 1),
+            stat = "count", vjust = -.7) +
+  xlab("Transazione") +
+  ylab("Totale") +
+  ggtitle("Distribuzione delle transazioni")
+```
+
+
+```{r}
+## Statistiche di sintesi
+dat %>% 
+  group_by(Class) %>% 
+  summarise(total = n(),
+            mean  = mean(Amount),
+            std   = sd(Amount),
+            min   = min(Amount),
+            Q1    = quantile(Amount, probs = c(.25)),
+            Q2    = quantile(Amount, probs = c(.50)),
+            Q3    = quantile(Amount, probs = c(.75)),
+            max   = max(Amount))
+
+```
+
+
+```{r}
+## Modelling
+u <- createDataPartition(dat$Class, p = .90,
+                         times = 10,
+                         list = T)
+
+## Set Addestramento
+idx <- u[[1]]
+dat_add <- dat[idx, ]
+y_add   <- dat_add$Class
+
+## External Validation Set (10% del set di dati iniziale)
+dat_validation  <- dat[-idx, ]
+y_validation    <- dat_validation$Class
+
+```
+
+
+```{r}
+## Metriche
+f1 <- function(data, lev = NULL, model = NULL){
+  f1.val <- F1_Score(y_pred = data$pred,
+                     y_true = data$obs,
+                     positive = "1")
+  f2.val <- FBeta_Score(y_pred = data$pred,
+                        y_true = data$obs,
+                        positive = "1",
+                        beta = 2)
+  Pr <- posPredValue(data$pred, data$obs,
+                            positive = "1")
+  Rc <- sensitivity(data$pred, data$obs,
+                            positive = "1")
+  Sp <- specificity(data$pred, data$obs,
+                    positive = "1")
+  Npv <- negPredValue(data$pred, data$obs,
+                      positive = "1")
+  AUC <- rocit(score = as.numeric(data$pred),
+               class = data$obs)$AUC
+  MCC <- mccr(pred = data$pred,
+              act = data$obs)
+  Kp <- Kappa.test(table(data$obs, data$pred))$Result$estimate
+  
+  c(F1 = f1.val, F2 = f2.val, Precision = Pr, Recall = Rc,
+    Specificity = Sp, NegPredValue = Npv,
+    AUC = AUC, MCC = MCC, KCohen = Kp)
+}
+```
+
+
+```{r}
+## Repeated Cross Validation
+train.control <- trainControl(method = "repeatedcv",
+                          number = 10,
+                          repeats = 20,
+                          classProbs = F,
+                          summaryFunction = f1)
+```
+
+
+```{r}
+## Regressione Logistica
+mod.logit <- train(Class ~ .,
+                   data = dat_add,
+                   method = "glm",
+                   trControl = train.control)
+
+## Evaluation Metrics
+mod.logit
+
+## Valutazione degli errori medi in Cross-Validation
+cm.logit <- confusionMatrix(mod.logit)
+
+## Graficamente
+fourfoldplot(round(cm.logit$table, 2),
+             main = "Regressione Logistica")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.logit <- predict(mod.logit, newdata = dat_validation,
+                      type = "raw")
+## Performance
+cm.logit.val <- confusionMatrix(prev.logit,
+                                dat_validation$Class,
+                                mode = "everything",
+                                positive = "1")
+## Graficamente
+fourfoldplot(cm.logit.val$table,
+             main = "Regressione Logistica (External Validation Set)")
+
+## F2Score
+f2.logit <- FBeta_Score(y_true = dat_validation$Class,
+                        y_pred = prev.logit,
+                        positive = 1, beta = 2)
+## AUC
+roc.logit <- rocit(score = as.numeric(prev.logit),
+                    class = dat_validation$Class)
+## Graficamente
+plot(roc.logit)
+
+## MCC
+MCC.logit <- mccr(act = dat_validation$Class,
+                  pred = prev.logit)
+
+```
+
+
+```{r}
+## Analisi Discriminante Lineare
+mod.lda <- train(Class ~ .,
+                 data = dat_add,
+                 method = "lda",
+                 trControl = train.control)
+
+## Evaluation Metrics
+mod.lda
+
+## Valutazione degli errori medi in Cross-Validation
+cm.lda <- confusionMatrix(mod.lda)
+
+## Graficamente
+fourfoldplot(round(cm.lda$table, 2), main = "LDA")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.lda <- predict(mod.lda, newdata = dat_validation)
+
+## Performance
+cm.lda.val <- confusionMatrix(prev.lda,
+                              dat_validation$Class,
+                              mode = "everything",
+                              positive = "1")
+
+## Graficamente
+fourfoldplot(cm.lda.val$table,
+             main = "LDA (External Validation Set)")
+
+## F2Score
+f2.lda <- FBeta_Score(y_true = dat_validation$Class,
+                      y_pred = prev.lda,
+                      positive = 1, beta = 2)
+
+## AUC
+roc.lda <- rocit(score = as.numeric(prev.lda),
+                 class = dat_validation$Class)
+## Graficamente
+plot(roc.lda)
+
+## MCC
+MCC.lda <- mccr(act = dat_validation$Class,
+                pred = prev.lda)
+
+```
+
+
+```{r}
+## Analisi Discriminante Quadratica
+mod.qda <- train(Class ~ ., data = dat_add,
+                 method = "qda", trControl = train.control)
+
+## Evaluation Metrics
+mod.qda
+
+## Valutazione degli errori medi in Cross-Validation
+cm.qda <- confusionMatrix(mod.qda)
+
+## Graficamente
+fourfoldplot(round(cm.qda$table, 2), main = "QDA")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.qda <- predict(mod.qda, newdata = dat_validation)
+
+## Performance
+cm.qda.val <- confusionMatrix(prev.qda,
+                              dat_validation$Class,
+                              mode = "everything",
+                              positive = "1")
+
+## Graficamente
+fourfoldplot(cm.qda.val$table,
+             main = "QDA (External Validation Set)")
+
+## F2Score
+f2.qda <- FBeta_Score(y_true = dat_validation$Class,
+                      y_pred = prev.qda,
+                      positive = 1, beta = 2)
+
+## AUC
+roc.qda <- rocit(score = as.numeric(prev.qda),
+                 class = dat_validation$Class)
+## Graficamente
+plot(roc.qda)
+
+## MCC
+MCC.qda <- mccr(act = dat_validation$Class,
+                pred = prev.qda)
+
+```
+
+
+```{r}
+## Albero di decisione
+mod.dt <- train(Class ~ .,
+                data = dat_add,
+                method = "rpart",
+                trControl = train.control)
+
+## Evaluation Metrics
+mod.dt
+
+## Valutazione degli errori medi in Cross-Validation
+cm.dt <- confusionMatrix(mod.dt)
+
+## Graficamente
+fourfoldplot(round(cm.dt$table, 2),
+             main = "Albero di Decisione")
+
+## Valutazione dell'errore rispetto al singolo validation set.
+## Previsione
+prev.dt <- predict(mod.dt, newdata = dat_validation)
+
+## Performance
+cm.dt.val <- confusionMatrix(prev.dt,
+                             dat_validation$Class,
+                             mode = "everything",
+                             positive = "1")
+
+## Graficamente
+fourfoldplot(cm.dt.val$table,
+             main = "Albero di Decisione (External Validation Set)")
+
+## F2Score
+f2.dt <- FBeta_Score(y_true = dat_validation$Class,
+                     y_pred = prev.dt,
+                     positive = 1, beta = 2)
+
+## AUC
+roc.dt <- rocit(score = as.numeric(prev.dt),
+                class = dat_validation$Class)
+## Graficamente
+plot(roc.dt)
+
+## MCC
+MCC.dt <- mccr(act = dat_validation$Class,
+               pred = prev.dt)
+
+## Regolo gli iperparametri
+## minsplit = numero minimo di osservazioni nel nodo prima che l'algoritmo esegua una divisione.
+## minbucket = imposta il numero minimo di osservazioni nella foglia.
+## maxdepth = imposta la profondità massima di qualsiasi nodo dell'albero finale. Il nodo radice viene trattato con profondità 0.
+
+## Costruisco una funzione che restituisca F1, F2 e AUC
+
+acc.tune <- function(mod.dt){
+  predict.unseen <- predict(mod.dt, newdata = dat_add,
+                            type = "class")
+  F1 <- F1_Score(y_true = dat_add$Class,
+                 y_pred = predict.unseen,
+                 positive = "1")
+  F2 <- FBeta_Score(y_true = dat_add$Class,
+                    y_pred = predict.unseen,
+                    positive = "1", beta = 2)
+  roc.dt <- rocit(score = as.integer(predict.unseen),
+                  class = dat_add$Class)
+  c(F1, F2, roc.dt$AUC)
+}
+
+control  <- rpart.control(minsplit = 4,
+                          minbucket = round(5/3),
+                          maxdepth = 3,
+                          cp = 0)
+
+tune.mod <- rpart(Class ~ ., data = dat_add,
+                  method = "class", control = control)
+acc.tune(tune.mod)
+
+```
+
